@@ -1,0 +1,8 @@
+.*
+bin
+obj
+gen
+google-breakpad
+/ant.properties
+NUL*
+assets/symbols

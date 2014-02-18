@@ -1,0 +1,199 @@
+Index: exploitability.cc
+===================================================================
+diff --git a/trunk/src/processor/exploitability.cc b/trunk/src/processor/exploitability.cc
+--- a/trunk/src/processor/exploitability.cc	(revision 1279)
++++ b/trunk/src/processor/exploitability.cc	(working copy)
+@@ -69,11 +69,11 @@
+     return NULL;
+ 
+   switch (raw_system_info->platform_id) {
+-    case MD_OS_WIN32_NT:
+-    case MD_OS_WIN32_WINDOWS: {
+-      platform_exploitability = new ExploitabilityWin(dump, process_state);
+-      break;
+-    }
++//    case MD_OS_WIN32_NT:
++//    case MD_OS_WIN32_WINDOWS: {
++//      platform_exploitability = new ExploitabilityWin(dump, process_state);
++//      break;
++//    }
+     case MD_OS_LINUX: {
+       platform_exploitability = new ExploitabilityLinux(dump, process_state);
+       break;
+Index: simple_symbol_supplier.cc
+===================================================================
+diff --git a/trunk/src/processor/simple_symbol_supplier.cc b/trunk/src/processor/simple_symbol_supplier.cc
+--- a/trunk/src/processor/simple_symbol_supplier.cc	(revision 1279)
++++ b/trunk/src/processor/simple_symbol_supplier.cc	(working copy)
+@@ -35,6 +35,8 @@
+ 
+ #include "processor/simple_symbol_supplier.h"
+ 
++#include <android/log.h>
++#include <ctype.h>
+ #include <assert.h>
+ #include <string.h>
+ #include <sys/types.h>
+@@ -50,6 +52,10 @@
+ #include "processor/logging.h"
+ #include "processor/pathname_stripper.h"
+ 
++#define CRASH_PRINTF(...) ((void)__android_log_print(ANDROID_LOG_WARN,  \
++											 "CrashReport", \
++											 __VA_ARGS__))
++
+ namespace google_breakpad {
+ 
+ static bool file_exists(const string &file_name) {
+@@ -95,6 +101,23 @@
+   return s;
+ }
+ 
++SymbolSupplier::SymbolResult SimpleSymbolSupplier::GetSymbolFile( const CodeModule * 	module,
++		  const SystemInfo * 	system_info,
++		  string * 				symbol_file,
++		  char ** 				symbol_data,
++		  size_t* 				symbol_data_size){
++	SymbolSupplier::SymbolResult s = GetSymbolFile(module, system_info,
++			symbol_file);
++	if (s == FOUND) {
++
++		if( file_read_handler ){
++			file_read_handler(symbol_file->c_str(),symbol_data, symbol_data_size);
++		}
++	}
++	return s;
++
++}
++
+ SymbolSupplier::SymbolResult SimpleSymbolSupplier::GetCStringSymbolData(
+     const CodeModule *module,
+     const SystemInfo *system_info,
+@@ -104,21 +127,33 @@
+   assert(symbol_data);
+   assert(symbol_data_size);
+ 
++  SymbolSupplier::SymbolResult s = NOT_FOUND;
+   string symbol_data_string;
+-  SymbolSupplier::SymbolResult s =
+-      GetSymbolFile(module, system_info, symbol_file, &symbol_data_string);
+ 
++  //if `file_read_handler exists get symbol data from handler or use as original way
++  if(file_read_handler)
++	  s = GetSymbolFile(module, system_info, symbol_file, symbol_data,symbol_data_size);
++  else{
++	  s = GetSymbolFile(module, system_info, symbol_file, &symbol_data_string);
++  }
++
+   if (s == FOUND) {
+-    *symbol_data_size = symbol_data_string.size() + 1;
+-    *symbol_data = new char[*symbol_data_size];
+-    if (*symbol_data == NULL) {
+-      BPLOG(ERROR) << "Memory allocation for size " << *symbol_data_size
++	  if(!file_read_handler){
++		  *symbol_data_size = symbol_data_string.size() + 1;
++		  *symbol_data = new char[*symbol_data_size];
++
++	  }
++	  if (*symbol_data == NULL) {
++		  BPLOG(ERROR) << "Memory allocation for size " << *symbol_data_size
+                    << " failed";
+-      return INTERRUPT;
+-    }
+-    memcpy(*symbol_data, symbol_data_string.c_str(), symbol_data_string.size());
+-    (*symbol_data)[symbol_data_string.size()] = '\0';
+-    memory_buffers_.insert(make_pair(module->code_file(), *symbol_data));
++		  CRASH_PRINTF("null symbol data??? orz, size? %zu",*symbol_data_size);
++		  return INTERRUPT;
++	  }
++	  if(!file_read_handler){
++		  memcpy(*symbol_data, symbol_data_string.c_str(), symbol_data_string.size());
++		  (*symbol_data)[symbol_data_string.size()] = '\0';
++	  }
++	  memory_buffers_.insert(make_pair(module->code_file(), *symbol_data));
+   }
+   return s;
+ }
+@@ -135,7 +170,10 @@
+                 << module->code_file();
+     return;
+   }
+-  delete [] it->second;
++  if(free_memory_hander)
++	  free_memory_hander(it->second);
++  else
++	  delete [] it->second;
+   memory_buffers_.erase(it);
+ }
+ 
+@@ -191,8 +229,10 @@
+     path.append(debug_file_name);
+   }
+   path.append(".sym");
++  if(!file_exists_handler)
++	  file_exists_handler=&file_exists;
+ 
+-  if (!file_exists(path)) {
++  if (!file_exists_handler(path)) {
+     BPLOG(INFO) << "No symbol file at " << path;
+     return NOT_FOUND;
+   }
+Index: simple_symbol_supplier.h
+===================================================================
+diff --git a/trunk/src/processor/simple_symbol_supplier.h b/trunk/src/processor/simple_symbol_supplier.h
+--- a/trunk/src/processor/simple_symbol_supplier.h	(revision 1279)
++++ b/trunk/src/processor/simple_symbol_supplier.h	(working copy)
+@@ -94,11 +94,11 @@
+  public:
+   // Creates a new SimpleSymbolSupplier, using path as the root path where
+   // symbols are stored.
+-  explicit SimpleSymbolSupplier(const string &path) : paths_(1, path) {}
++  explicit SimpleSymbolSupplier(const string &path) : paths_(1, path),  file_exists_handler(0), file_read_handler(0),free_memory_handler(0) {}
+ 
+   // Creates a new SimpleSymbolSupplier, using paths as a list of root
+   // paths where symbols may be stored.
+-  explicit SimpleSymbolSupplier(const vector<string> &paths) : paths_(paths) {}
++  explicit SimpleSymbolSupplier(const vector<string> &paths) : paths_(paths),  file_exists_handler(0), file_read_handler(0),free_memory_handler(0){}
+ 
+   virtual ~SimpleSymbolSupplier() {}
+ 
+@@ -113,6 +113,12 @@
+                                      string *symbol_file,
+                                      string *symbol_data);
+ 
++  SymbolResult GetSymbolFile( const CodeModule * 	module,
++		  const SystemInfo * 	system_info,
++		  string * 				symbol_file,
++		  char ** 				symbol_data,
++		  size_t* 				symbol_data_size);
++
+   // Allocates data buffer on heap and writes symbol data into buffer.
+   // Symbol supplier ALWAYS takes ownership of the data buffer.
+   virtual SymbolResult GetCStringSymbolData(const CodeModule *module,
+@@ -124,6 +130,15 @@
+   // Free the data buffer allocated in the above GetCStringSymbolData();
+   virtual void FreeSymbolData(const CodeModule *module);
+ 
++ //file handler related
++  typedef bool ( *File_exists_handler	) (const string &file_name);
++  typedef bool ( *File_read_handler	 	) (const char * file_name, char** output, size_t * readSize);
++  typedef void ( *Free_memory_handler 	) (void * pBuffer);
++
++  void SetFileExistsHandler( File_exists_handler handler )	{	file_exists_handler = handler; 		}
++  void SetFileReadHandler( File_read_handler handler )		{ 	file_read_handler 	= handler;		}
++  void SetFreeMemoryHandler( Free_memory_handler handler)	{ 	free_memory_handler 	= handler;		}
++
+  protected:
+   SymbolResult GetSymbolFileAtPathFromRoot(const CodeModule *module,
+                                            const SystemInfo *system_info,
+@@ -133,6 +148,10 @@
+  private:
+   map<string, char *> memory_buffers_;
+   vector<string> paths_;
++
++  File_exists_handler			file_exists_handler;
++  File_read_handler				file_read_handler;
++  Free_memory_handler			free_memory_handler;
+ };
+ 
+ }  // namespace google_breakpad
